@@ -18,6 +18,8 @@
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/videoio.hpp>
 #include <spdlog/spdlog.h>
 #include <popl.hpp>
 
@@ -141,16 +143,26 @@ void mono_tracking(const std::shared_ptr<openvslam::config>& cfg,
 }
 
 void stereo_tracking(const std::shared_ptr<openvslam::config>& cfg,
-                     const std::string& vocab_file_path, const std::string& sequence_dir_path,
+                     const std::string& vocab_file_path, const std::string& path,
                      const unsigned int frame_skip, const bool no_sleep, const bool auto_term,
-                     const bool eval_log, const std::string& map_db_path) {
-    const kitti_sequence sequence(sequence_dir_path);
+                     const bool eval_log, const std::string& map_db_path, const bool is_video=false) {
+    const kitti_sequence sequence(path, is_video);
     const auto frames = sequence.get_frames();
+    int num_frames;
+    // int speed_up = 2;
 
     // build a SLAM system
     openvslam::system SLAM(cfg, vocab_file_path);
     // startup the SLAM process
     SLAM.startup();
+
+    cv::Mat vid_frame;
+    cv::VideoCapture video;
+    double vid_timestamp = 0;
+    if(is_video) {
+        video = cv::VideoCapture(path, cv::CAP_FFMPEG);  
+        num_frames = int(video.get(cv::CAP_PROP_FRAME_COUNT));
+    }
 
     // create a viewer object
     // and pass the frame_publisher and the map_publisher
@@ -161,20 +173,39 @@ void stereo_tracking(const std::shared_ptr<openvslam::config>& cfg,
 #endif
 
     std::vector<double> track_times;
-    track_times.reserve(frames.size());
+    if(!is_video) {
+        track_times.reserve(frames.size());
+        num_frames = frames.size();
+    }
 
     // run the SLAM in another thread
     std::thread thread([&]() {
-        for (unsigned int i = 0; i < frames.size(); ++i) {
-            const auto& frame = frames.at(i);
-            const auto left_img = cv::imread(frame.left_img_path_, cv::IMREAD_UNCHANGED);
-            const auto right_img = cv::imread(frame.right_img_path_, cv::IMREAD_UNCHANGED);
-
+        for (unsigned int i = 0; i < num_frames; ++i) {
+            cv::Mat left_img, right_img;
+            double cur_timestamp, next_timestamp;
+            
+            if(!is_video) {
+                auto& frame = frames.at(i);
+                left_img = cv::imread(frame.left_img_path_, cv::IMREAD_UNCHANGED);
+                right_img = cv::imread(frame.right_img_path_, cv::IMREAD_UNCHANGED);
+                cur_timestamp = frame.timestamp_;
+                if(i < num_frames - 1)
+                    next_timestamp = frames.at(i + 1).timestamp_;
+            }
+            else {
+                video.read(vid_frame);
+                int w = vid_frame.cols;
+                int h = vid_frame.rows;
+                left_img = vid_frame(cv::Rect(0, 0, w/2, h));
+                right_img = vid_frame(cv::Rect(w/2, 0, w/2, h));
+                cur_timestamp = vid_timestamp;
+                next_timestamp = vid_timestamp + 1.0/30;
+            }
             const auto tp_1 = std::chrono::steady_clock::now();
 
             if (!left_img.empty() && !right_img.empty() && (i % frame_skip == 0)) {
                 // input the current frame and estimate the camera pose
-                SLAM.feed_stereo_frame(left_img, right_img, frame.timestamp_);
+                SLAM.feed_stereo_frame(left_img, right_img, cur_timestamp);
             }
 
             const auto tp_2 = std::chrono::steady_clock::now();
@@ -185,8 +216,8 @@ void stereo_tracking(const std::shared_ptr<openvslam::config>& cfg,
             }
 
             // wait until the timestamp of the next frame
-            if (!no_sleep && i < frames.size() - 1) {
-                const auto wait_time = frames.at(i + 1).timestamp_ - (frame.timestamp_ + track_time);
+            if (!no_sleep && i < num_frames - 1) {
+                double wait_time = next_timestamp - (cur_timestamp + track_time);
                 if (0.0 < wait_time) {
                     std::this_thread::sleep_for(std::chrono::microseconds(static_cast<unsigned int>(wait_time * 1e6)));
                 }
@@ -263,6 +294,7 @@ int main(int argc, char* argv[]) {
     auto help = op.add<popl::Switch>("h", "help", "produce help message");
     auto vocab_file_path = op.add<popl::Value<std::string>>("v", "vocab", "vocabulary file path");
     auto data_dir_path = op.add<popl::Value<std::string>>("d", "data-dir", "directory path which contains dataset");
+    auto file_path = op.add<popl::Value<std::string>>("f", "file-path", "file path which contains dataset (superceded data-dir-path)");
     auto config_file_path = op.add<popl::Value<std::string>>("c", "config", "config file path");
     auto frame_skip = op.add<popl::Value<unsigned int>>("", "frame-skip", "interval of frame skip", 1);
     auto no_sleep = op.add<popl::Switch>("", "no-sleep", "not wait for next frame in real time");
@@ -285,7 +317,7 @@ int main(int argc, char* argv[]) {
         std::cerr << op << std::endl;
         return EXIT_FAILURE;
     }
-    if (!vocab_file_path->is_set() || !data_dir_path->is_set() || !config_file_path->is_set()) {
+    if (!vocab_file_path->is_set() || (!data_dir_path->is_set() && !file_path->is_set())|| !config_file_path->is_set()) {
         std::cerr << "invalid arguments" << std::endl;
         std::cerr << std::endl;
         std::cerr << op << std::endl;
@@ -315,6 +347,17 @@ int main(int argc, char* argv[]) {
     ProfilerStart("slam.prof");
 #endif
 
+    // Allow avi for stereo video
+    std::string path;
+    if(file_path->is_set()) {
+        path = file_path->value();
+    }
+    else {
+        path = data_dir_path->value();
+    }
+    
+    std::cout << "file_path.is_set() = " << file_path->is_set() << std::endl;
+
     // run tracking
     if (cfg->camera_->setup_type_ == openvslam::camera::setup_type_t::Monocular) {
         mono_tracking(cfg, vocab_file_path->value(), data_dir_path->value(),
@@ -322,9 +365,9 @@ int main(int argc, char* argv[]) {
                       eval_log->is_set(), map_db_path->value());
     }
     else if (cfg->camera_->setup_type_ == openvslam::camera::setup_type_t::Stereo) {
-        stereo_tracking(cfg, vocab_file_path->value(), data_dir_path->value(),
+        stereo_tracking(cfg, vocab_file_path->value(), path,
                         frame_skip->value(), no_sleep->is_set(), auto_term->is_set(),
-                        eval_log->is_set(), map_db_path->value());
+                        eval_log->is_set(), map_db_path->value(), file_path->is_set());
     }
     else {
         throw std::runtime_error("Invalid setup type: " + cfg->camera_->get_setup_type_string());

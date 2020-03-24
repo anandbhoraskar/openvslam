@@ -5,7 +5,11 @@
 #include <iomanip>
 #include <cassert>
 
-kitti_sequence::kitti_sequence(const std::string& seq_dir_path) {
+kitti_sequence::kitti_sequence(const std::string& seq_dir_path, const bool is_video) {
+    is_video_ = is_video;
+    if(is_video) {
+        return;
+    }
     // load timestamps
     const std::string timestamp_file_path = seq_dir_path + "/times.txt";
     std::ifstream ifs_timestamp;
@@ -44,6 +48,9 @@ kitti_sequence::kitti_sequence(const std::string& seq_dir_path) {
 }
 
 std::vector<kitti_sequence::frame> kitti_sequence::get_frames() const {
+    if(is_video_) {
+        return std::vector<kitti_sequence::frame>();
+    }
     std::vector<frame> frames;
     assert(timestamps_.size() == left_img_file_paths_.size());
     assert(timestamps_.size() == right_img_file_paths_.size());

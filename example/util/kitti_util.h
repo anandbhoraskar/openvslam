@@ -15,7 +15,7 @@ public:
         const double timestamp_;
     };
 
-    explicit kitti_sequence(const std::string& seq_dir_path);
+    explicit kitti_sequence(const std::string& seq_dir_path, const bool is_video = false);
 
     virtual ~kitti_sequence() = default;
 
@@ -25,6 +25,7 @@ private:
     std::vector<double> timestamps_;
     std::vector<std::string> left_img_file_paths_;
     std::vector<std::string> right_img_file_paths_;
+    bool is_video_;
 };
 
 #endif // EXAMPLE_UTIL_KITTI_UTIL_H
